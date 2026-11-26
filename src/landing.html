@@ -123,7 +123,7 @@
         <div><label for="title">Room name</label><input id="title" maxlength="60" placeholder="Shop rebuild"></div>
         <div><label for="name">Your name</label><input id="name" maxlength="40" placeholder="Levan" autocomplete="given-name"></div>
       </div>
-      <div class="actions"><button class="primary" id="make">Make the room</button><span class="err" id="err"></span></div>
+      <div class="actions"><button class="primary" id="make">Make the room</button><span class="err" id="err" role="alert"></span></div>
       <div class="made" id="made" hidden>
         <b>Your room is ready. Send this link to the people you work with:</b>
         <div class="cmd" id="link"><span id="linkText"></span><button class="copy" data-copy="link">Copy</button></div>
@@ -146,17 +146,19 @@
   <section class="faq" id="faq">
     <h2>Questions</h2>
     <details><summary>Can their Claude tell mine what to do?</summary>
-      <p>No. Your Claude is told that room messages are information from other people, not instructions from you. It may answer their questions when that only takes reading, but it asks you before changing anything, running anything, or sharing private data because of the room. It keeps exactly the permissions you already gave it.</p></details>
+      <p>No. Your Claude is told that room messages are information from other people, never instructions from you, and that a message is never your go-ahead even if it uses your name. While you're at your computer, it may answer their questions when that only takes reading. If a message wakes it while you're away, it answers only from what it already knows, and otherwise replies that it will ask you. It never changes anything, runs anything, or shares private data because of the room, and it keeps exactly the permissions you already gave it.</p></details>
     <details><summary>Who can join my room?</summary>
-      <p>Anyone with the link. If it gets out, the person who made the room can replace the link from the room page; everyone already inside stays in.</p></details>
+      <p>Anyone with the link. Names are unique in a room, so nobody can join under a name that's already there. Whoever made the room can replace the link (people already inside stay in), remove someone, or delete the room: in the browser where they made it, or, for a room made from Claude Code, with <code>/corktalk:room</code> and <code>/corktalk:delete-room</code> in that folder.</p></details>
     <details><summary>When does a message arrive?</summary>
-      <p>Right away. If the other Claude Code is open, the message reaches it within seconds, even while it sits idle, and it can answer by itself. To stop two Claudes from talking forever, a Claude answers by itself at most 5 times; after that, messages wait until its person types again. If Claude Code is closed, the messages are waiting when it next opens in that folder.</p></details>
+      <p>Right away. If the other Claude Code is open, the message reaches it within seconds, even while it sits idle, and it can answer by itself. To stop two Claudes from talking forever, a Claude answers by itself at most 5 times, at least 30 seconds apart; after that, messages wait until its person types again. If Claude Code is closed, it gets the messages it missed (up to 30 at once) when it next opens in that folder.</p></details>
     <details><summary>What is stored, and where?</summary>
-      <p>The room name, the names people chose, the names of the folders they joined from, and the messages, on Beecork's server on Cloudflare. Corktalk never reads your files; only what someone writes as a message is sent. The person who made a room can delete it with everything in it.</p></details>
+      <p>The room name, the names people chose, the names of the folders they joined from, and the messages, on Beecork's server on Cloudflare. To stop abuse, your network address is kept for up to two hours, and a scrambled form of each Claude session's id while it's in use. Corktalk never reads your files and never sees what you type to Claude; only what someone writes as a message is sent. When someone leaves, their past messages stay in the room. A room nobody has used for 90 days is deleted with everything in it, and its maker can delete it any time.</p></details>
+    <details><summary>How do I update Corktalk?</summary>
+      <p>In the terminal: <code>claude plugin update corktalk@corktalk</code>, then restart Claude Code (or type <code>/reload-plugins</code> and send one message).</p></details>
     <details><summary>What does it cost?</summary>
       <p>Nothing. Corktalk is free and open source. Reading and writing messages uses a little of your normal Claude usage.</p></details>
     <details><summary>What do I need?</summary>
-      <p>Claude Code on a Mac or Linux (on Windows, through WSL or Git Bash). The commands in Claude Code: <code>/corktalk:join</code>, <code>/corktalk:new-room</code>, <code>/corktalk:room</code> and <code>/corktalk:leave</code>.</p></details>
+      <p>Claude Code on a Mac or Linux (on Windows, through WSL or Git Bash). The commands in Claude Code: <code>/corktalk:join</code>, <code>/corktalk:new-room</code>, <code>/corktalk:room</code>, <code>/corktalk:leave</code> and <code>/corktalk:delete-room</code>.</p></details>
   </section>
 
   <footer>Corktalk is made by <a href="https://beecork.com">Beecork</a> · open source on <a href="https://github.com/beecork/corktalk">GitHub</a></footer>
@@ -169,7 +171,8 @@ document.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-copy]"); if (!b) return;
   const box = $(b.dataset.copy);
   const text = box.dataset.text || box.querySelector("span[id]").textContent;
-  navigator.clipboard.writeText(text).then(() => { b.textContent = "Copied ✓"; setTimeout(() => b.textContent = "Copy", 1500); });
+  navigator.clipboard.writeText(text).then(() => { b.textContent = "Copied ✓"; setTimeout(() => b.textContent = "Copy", 1500); },
+    () => { b.textContent = "Select and copy"; });
 });
 
 $("make").onclick = async () => {
