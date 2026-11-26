@@ -1,0 +1,162 @@
+#!/bin/sh
+# Corktalk helper for the Claude Code plugin. Needs only sh and curl.
+#
+#   corktalk join <room link or code> <name> [session id]
+#   corktalk new <room title> <name> [session id]
+#   corktalk status | leave | new-link | name | hook
+#
+# Which folder is in which room is kept in ~/.corktalk/folders/, one small
+# file per folder holding that folder's room key. Nothing is written into
+# the project itself.
+
+set -u
+SERVER="${CORKTALK_SERVER:-https://corktalk.beecork.com}"
+HOME_DIR="$HOME/.corktalk"
+FOLDERS="$HOME_DIR/folders"
+
+here() {
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then printf '%s' "$CLAUDE_PROJECT_DIR"; else pwd -P; fi
+}
+
+file_for() { printf '%s/%s' "$FOLDERS" "$(printf '%s' "$1" | sed 's#[^A-Za-z0-9._-]#_#g')"; }
+
+# The file of the joined folder that holds $1 (the folder itself or one above it).
+find_file() {
+  d="$1"
+  while [ -n "$d" ]; do
+    f=$(file_for "$d")
+    if [ -f "$f" ]; then printf '%s' "$f"; return 0; fi
+    [ "$d" = "/" ] && return 1
+    d=$(dirname "$d")
+  done
+  return 1
+}
+
+field() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+
+clean_sid() { printf '%s' "${1:-}" | tr -cd 'A-Za-z0-9_-'; }
+
+# POSTs form fields; sets BODY and CODE.
+post() {
+  url="$1"; shift
+  out=$(curl -sS -m 20 -X POST "$@" -w '\n%{http_code}' "$url" 2>&1) || { BODY="Could not reach $SERVER ($out)"; CODE=000; return; }
+  CODE=$(printf '%s\n' "$out" | tail -n 1)
+  BODY=$(printf '%s\n' "$out" | sed '$d')
+}
+
+error_text() {
+  e=$(printf '%s' "$BODY" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')
+  [ -n "$e" ] && printf '%s' "$e" || printf '%s' "$BODY"
+}
+
+save() {
+  dir="$1"; body="$2"; code="$3"
+  mkdir -p "$FOLDERS" && chmod 700 "$HOME_DIR" "$FOLDERS"
+  f=$(file_for "$dir")
+  ( umask 077
+    { printf 'folder=%s\n' "$dir"
+      printf 'code=%s\n' "$code"
+      printf '%s\n' "$body" | grep -E '^(key|title|name)='
+    } > "$f" )
+}
+
+# Tells the server about this Claude session right away and prints the room's welcome note.
+register() {
+  sid=$(clean_sid "${1:-}")
+  f="$2"
+  [ -n "$sid" ] || return 0
+  printf '{"hook_event_name":"SessionStart","session_id":"%s"}' "$sid" |
+    curl -sf -m 10 -X POST -H "Authorization: Bearer $(field key "$f")" -H 'Content-Type: application/json' \
+      --data-binary @- "$SERVER/hook" || true
+  echo
+}
+
+leave_quietly() {
+  f="$1"
+  curl -sf -m 10 -X DELETE -H "Authorization: Bearer $(field key "$f")" "$SERVER/api/me" >/dev/null 2>&1 || true
+  rm -f "$f"
+}
+
+cmd_join() {
+  link="${1:-}"; name="${2:-}"; sid="${3:-}"
+  [ -n "$link" ] && [ -n "$name" ] || { echo "Usage: corktalk join <room link or code> <name>"; exit 2; }
+  dir=$(here)
+  old=$(file_for "$dir")
+  post "$SERVER/api/join?format=sh" --data-urlencode "code=$link" --data-urlencode "name=$name" \
+    --data-urlencode "kind=claude" --data-urlencode "label=$(basename "$dir")"
+  [ "$CODE" = 200 ] || { echo "Could not join: $(error_text)"; exit 1; }
+  [ -f "$old" ] && leave_quietly "$old"
+  code=$(printf '%s\n' "$BODY" | sed -n 's/^code=//p')
+  save "$dir" "$BODY" "$code"
+  printf '%s\n' "$name" > "$HOME_DIR/name"
+  f=$(file_for "$dir")
+  echo "Joined the Corktalk room \"$(field title "$f")\" as $name. Folder: $dir"
+  echo "Room page: $SERVER/r/$code"
+  register "$sid" "$f"
+}
+
+cmd_new() {
+  title="${1:-}"; name="${2:-}"; sid="${3:-}"
+  [ -n "$name" ] || { echo "Usage: corktalk new <room title> <name>"; exit 2; }
+  dir=$(here)
+  old=$(file_for "$dir")
+  post "$SERVER/api/rooms?format=sh" --data-urlencode "title=$title" --data-urlencode "name=$name" \
+    --data-urlencode "kind=claude" --data-urlencode "label=$(basename "$dir")"
+  [ "$CODE" = 200 ] || { echo "Could not make the room: $(error_text)"; exit 1; }
+  [ -f "$old" ] && leave_quietly "$old"
+  code=$(printf '%s\n' "$BODY" | sed -n 's/^code=//p')
+  save "$dir" "$BODY" "$code"
+  printf '%s\n' "$name" > "$HOME_DIR/name"
+  f=$(file_for "$dir")
+  echo "Made the Corktalk room \"$(field title "$f")\". This folder is in it as $name."
+  echo "Share this link with the people who should join (anyone with it can join):"
+  echo "$SERVER/r/$code"
+  register "$sid" "$f"
+}
+
+cmd_status() {
+  f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room. Join one with /corktalk:join <room link>."; exit 0; }
+  echo "Folder: $(field folder "$f")"
+  echo "Room: $(field title "$f")"
+  echo "You appear as: $(field name "$f")"
+  echo "Room page: $SERVER/r/$(field code "$f")"
+}
+
+cmd_leave() {
+  f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room."; exit 0; }
+  t=$(field title "$f"); d=$(field folder "$f")
+  leave_quietly "$f"
+  echo "Left the Corktalk room \"$t\". The folder $d no longer receives its messages."
+}
+
+cmd_new_link() {
+  f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room."; exit 1; }
+  post "$SERVER/api/new-link?format=sh" -H "Authorization: Bearer $(field key "$f")"
+  [ "$CODE" = 200 ] || { echo "Could not replace the link: $(error_text)"; exit 1; }
+  code=$(printf '%s\n' "$BODY" | sed -n 's/^code=//p')
+  tmp="$f.tmp"; sed "s/^code=.*/code=$code/" "$f" > "$tmp" && mv "$tmp" "$f"
+  echo "The old link no longer works. People already in the room stay in. New link:"
+  echo "$SERVER/r/$code"
+}
+
+cmd_hook() {
+  f=$(find_file "$(here)") || { cat >/dev/null; exit 0; }
+  curl -sf -m 5 -X POST -H "Authorization: Bearer $(field key "$f")" -H 'Content-Type: application/json' \
+    --data-binary @- "$SERVER/hook" || true
+  exit 0
+}
+
+cmd_name() { [ -f "$HOME_DIR/name" ] && cat "$HOME_DIR/name"; exit 0; }
+
+command -v curl >/dev/null 2>&1 || { echo "Corktalk needs curl, which is not installed."; exit 1; }
+
+case "${1:-}" in
+  join) shift; cmd_join "$@" ;;
+  new) shift; cmd_new "$@" ;;
+  status) cmd_status ;;
+  leave) cmd_leave ;;
+  new-link) cmd_new_link ;;
+  name) cmd_name ;;
+  hook) cmd_hook ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

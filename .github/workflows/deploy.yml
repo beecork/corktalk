@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: 22
       - name: Syntax check
-        run: node --check src/index.js && node --check src/hub.js && node --check src/mcp.js && node --check src/page.js
+        run: for f in src/*.js; do node --check "$f"; done && sh -n plugin/bin/corktalk && for f in .claude-plugin/marketplace.json plugin/.claude-plugin/plugin.json plugin/.mcp.json plugin/hooks/hooks.json; do node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"; done
       - name: Dry-run bundle
         run: npx --yes wrangler@4 deploy --dry-run --outdir dist
 
@@ -29,10 +29,6 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4"
-          secrets: |
-            ADMIN_TOKEN
-        env:
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
       - name: Smoke test
         run: |
           for i in $(seq 1 12); do curl -sf https://corktalk.beecork.com/health && exit 0; sleep 10; done; exit 1

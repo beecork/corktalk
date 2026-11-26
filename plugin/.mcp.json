@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "corktalk": {
+      "type": "http",
+      "url": "https://corktalk.beecork.com/mcp"
+    }
+  }
+}
