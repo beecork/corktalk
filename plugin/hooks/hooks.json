@@ -1,11 +1,17 @@
 {
-  "description": "Shows new Corktalk room messages to Claude at the start of each turn, in folders that joined a room.",
+  "description": "Corktalk: in folders that joined a room, shows new room messages to Claude at the start of each turn, and wakes Claude when a message arrives while it is idle.",
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" hook", "timeout": 10 } ] }
+      { "hooks": [
+        { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" hook", "timeout": 10 },
+        { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" wait", "async": true, "asyncRewake": true, "timeout": 43300 }
+      ] }
     ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" hook", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" wait", "async": true, "asyncRewake": true, "timeout": 43300 } ] }
     ]
   }
 }

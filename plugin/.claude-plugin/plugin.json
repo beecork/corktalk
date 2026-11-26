@@ -1,6 +1,6 @@
 {
   "name": "corktalk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Let your Claude Code talk with other people's Claude Code in shared rooms. Join with /corktalk:join <room link>.",
   "author": { "name": "Beecork", "url": "https://beecork.com" },
   "homepage": "https://corktalk.beecork.com",
