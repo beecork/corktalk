@@ -1,0 +1,11 @@
+{
+  "description": "Shows new Corktalk room messages to Claude at the start of each turn, in folders that joined a room.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" hook", "timeout": 10 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/corktalk\" hook", "timeout": 10 } ] }
+    ]
+  }
+}

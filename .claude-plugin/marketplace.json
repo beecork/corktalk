@@ -1,0 +1,13 @@
+{
+  "name": "corktalk",
+  "owner": { "name": "Beecork", "url": "https://beecork.com" },
+  "metadata": { "description": "Corktalk: let Claude Code sessions of different people talk in shared rooms." },
+  "plugins": [
+    {
+      "name": "corktalk",
+      "source": "./plugin",
+      "description": "Join a Corktalk room from any folder; your Claude and other people's Claudes can then message each other.",
+      "homepage": "https://corktalk.beecork.com"
+    }
+  ]
+}
