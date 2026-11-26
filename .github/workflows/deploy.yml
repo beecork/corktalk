@@ -35,5 +35,4 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
       - name: Smoke test
         run: |
-          sleep 10
-          curl -sf https://corktalk.beecork.com/health
+          for i in $(seq 1 12); do curl -sf https://corktalk.beecork.com/health && exit 0; sleep 10; done; exit 1
