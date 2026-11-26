@@ -2,44 +2,62 @@
 # Corktalk helper for the Claude Code plugin. Needs only sh and curl.
 #
 #   corktalk join <room link or code> <name> [session id]
+#   corktalk join-stdin            (link, name, session id on three lines of stdin)
 #   corktalk new <room title> <name> [session id]
-#   corktalk status | leave | new-link | name | hook
+#   corktalk new-stdin             (title, name, session id on three lines of stdin)
+#   corktalk status | name | new-link | delete-room | leave [--force]
+#   corktalk hook | wait           (run by the plugin's hooks)
 #
 # Which folder is in which room is kept in ~/.corktalk/folders/, one small
 # file per folder holding that folder's room key. Nothing is written into
-# the project itself.
+# the project itself, and the hooks send the server only the session id.
 
 set -u
 SERVER="${CORKTALK_SERVER:-https://corktalk.beecork.com}"
-HOME_DIR="$HOME/.corktalk"
+HOME_DIR="${CORKTALK_HOME:-$HOME/.corktalk}"
 FOLDERS="$HOME_DIR/folders"
 
 here() {
-  if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then printf '%s' "$CLAUDE_PROJECT_DIR"; else pwd -P; fi
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then printf '%s' "$CLAUDE_PROJECT_DIR"; else pwd -P; fi | tr '\\' '/'
 }
 
-file_for() { printf '%s/%s' "$FOLDERS" "$(printf '%s' "$1" | sed 's#[^A-Za-z0-9._-]#_#g')"; }
+# One file per folder, named by a checksum of its full path; the file also
+# holds the path (folder=...), which is checked, so two folders never mix.
+file_for() { printf '%s/f-%s' "$FOLDERS" "$(printf '%s' "$1" | cksum | awk '{print $1 "-" $2}')"; }
+legacy_file_for() { printf '%s/%s' "$FOLDERS" "$(printf '%s' "$1" | sed 's#[^A-Za-z0-9._-]#_#g')"; }
+
+field() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+
+# The file of this folder only (no walking up), moving an old-style file over if needed.
+own_file() {
+  d="$1"; f=$(file_for "$d")
+  if [ -f "$f" ] && [ "$(field folder "$f")" = "$d" ]; then printf '%s' "$f"; return 0; fi
+  lf=$(legacy_file_for "$d")
+  if [ -f "$lf" ] && [ "$(field folder "$lf")" = "$d" ]; then mv "$lf" "$f" && printf '%s' "$f" && return 0; fi
+  return 1
+}
 
 # The file of the joined folder that holds $1 (the folder itself or one above it).
 find_file() {
   d="$1"
   while [ -n "$d" ]; do
-    f=$(file_for "$d")
-    if [ -f "$f" ]; then printf '%s' "$f"; return 0; fi
-    [ "$d" = "/" ] && return 1
-    d=$(dirname "$d")
+    own_file "$d" && return 0
+    n=$(dirname "$d")
+    [ "$n" = "$d" ] && return 1
+    d="$n"
   done
   return 1
 }
 
-field() { sed -n "s/^$1=//p" "$2" | head -n 1; }
-
 clean_sid() { printf '%s' "${1:-}" | tr -cd 'A-Za-z0-9_-'; }
 
-# POSTs form fields; sets BODY and CODE.
-post() {
-  url="$1"; shift
-  out=$(curl -sS -m 20 -X POST "$@" -w '\n%{http_code}' "$url" 2>&1) || { BODY="Could not reach $SERVER ($out)"; CODE=000; return; }
+# Reads one JSON string field from a small JSON text (no JSON tools needed).
+json_field() { printf '%s' "$2" | tr -d '\n' | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([A-Za-z0-9_-]*\\)\".*/\\1/p"; }
+
+# Sends a request; sets BODY and CODE. Usage: call METHOD URL [curl args...]
+call() {
+  m="$1"; url="$2"; shift 2
+  out=$(curl -sS -m 20 -X "$m" "$@" -w '\n%{http_code}' "$url" 2>&1) || { BODY="Could not reach $SERVER ($out)"; CODE=000; return; }
   CODE=$(printf '%s\n' "$out" | tail -n 1)
   BODY=$(printf '%s\n' "$out" | sed '$d')
 }
@@ -48,6 +66,8 @@ error_text() {
   e=$(printf '%s' "$BODY" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')
   [ -n "$e" ] && printf '%s' "$e" || printf '%s' "$BODY"
 }
+
+need_curl() { command -v curl >/dev/null 2>&1 || { echo "Corktalk needs curl, which is not installed."; exit 1; }; }
 
 save() {
   dir="$1"; body="$2"; code="$3"
@@ -71,22 +91,41 @@ register() {
   echo
 }
 
+is_owner() { call GET "$SERVER/api/room" -H "Authorization: Bearer $(field key "$1")"; printf '%s' "$BODY" | grep -q '"owner":true'; }
+
 leave_quietly() {
   f="$1"
   curl -sf -m 10 -X DELETE -H "Authorization: Bearer $(field key "$f")" "$SERVER/api/me" >/dev/null 2>&1 || true
   rm -f "$f"
 }
 
+# Making or joining another room from a folder that made its current room would
+# lose the only key that can delete that room. Refuse unless forced.
+guard_owner() {
+  old="$1"
+  [ -n "$old" ] && [ "${CORKTALK_FORCE:-}" != 1 ] && is_owner "$old" || return 0
+  echo "This folder made the room \"$(field title "$old")\". If it leaves, nobody can delete that room or replace its link any more."
+  echo "Delete it first with /corktalk:delete-room, or confirm to continue anyway."
+  exit 3
+}
+
 cmd_join() {
   link="${1:-}"; name="${2:-}"; sid="${3:-}"
   [ -n "$link" ] && [ -n "$name" ] || { echo "Usage: corktalk join <room link or code> <name>"; exit 2; }
+  need_curl
   dir=$(here)
-  old=$(file_for "$dir")
-  post "$SERVER/api/join?format=sh" --data-urlencode "code=$link" --data-urlencode "name=$name" \
-    --data-urlencode "kind=claude" --data-urlencode "label=$(basename "$dir")"
+  old=$(own_file "$dir") || old=""
+  replace=""
+  [ -n "$old" ] && replace=$(field key "$old")
+  # Joining another room from the folder that made this one would lose the maker's rights.
+  same=$(printf '%s' "$link" | sed 's#.*/r/##' | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')
+  [ -n "$old" ] && [ "$(field code "$old" | tr -cd 'a-z0-9')" != "$same" ] && guard_owner "$old"
+  call POST "$SERVER/api/join?format=sh" --data-urlencode "code=$link" --data-urlencode "name=$name" \
+    --data-urlencode "kind=claude" --data-urlencode "label=$(basename "$dir")" --data-urlencode "replace_key=$replace"
   [ "$CODE" = 200 ] || { echo "Could not join: $(error_text)"; exit 1; }
-  [ -f "$old" ] && leave_quietly "$old"
   code=$(printf '%s\n' "$BODY" | sed -n 's/^code=//p')
+  # Same room: the server already retired the old membership. Another room: leave it.
+  if [ -n "$old" ] && [ "$(field code "$old")" != "$code" ]; then leave_quietly "$old"; fi
   save "$dir" "$BODY" "$code"
   printf '%s\n' "$name" > "$HOME_DIR/name"
   f=$(file_for "$dir")
@@ -98,21 +137,27 @@ cmd_join() {
 cmd_new() {
   title="${1:-}"; name="${2:-}"; sid="${3:-}"
   [ -n "$name" ] || { echo "Usage: corktalk new <room title> <name>"; exit 2; }
+  need_curl
   dir=$(here)
-  old=$(file_for "$dir")
-  post "$SERVER/api/rooms?format=sh" --data-urlencode "title=$title" --data-urlencode "name=$name" \
+  old=$(own_file "$dir") || old=""
+  guard_owner "$old"
+  call POST "$SERVER/api/rooms?format=sh" --data-urlencode "title=$title" --data-urlencode "name=$name" \
     --data-urlencode "kind=claude" --data-urlencode "label=$(basename "$dir")"
   [ "$CODE" = 200 ] || { echo "Could not make the room: $(error_text)"; exit 1; }
-  [ -f "$old" ] && leave_quietly "$old"
+  [ -n "$old" ] && leave_quietly "$old"
   code=$(printf '%s\n' "$BODY" | sed -n 's/^code=//p')
   save "$dir" "$BODY" "$code"
   printf '%s\n' "$name" > "$HOME_DIR/name"
   f=$(file_for "$dir")
-  echo "Made the Corktalk room \"$(field title "$f")\". This folder is in it as $name."
+  echo "Made the Corktalk room \"$(field title "$f")\". This folder is in it as $name, and is the room's maker:"
+  echo "only this folder can replace the link or delete the room (with /corktalk:room and /corktalk:delete-room)."
   echo "Share this link with the people who should join (anyone with it can join):"
   echo "$SERVER/r/$code"
   register "$sid" "$f"
 }
+
+# Three lines on stdin, so names and links never pass through shell parsing.
+read_three() { IFS= read -r A || true; IFS= read -r B || true; IFS= read -r C || true; }
 
 cmd_status() {
   f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room. Join one with /corktalk:join <room link>."; exit 0; }
@@ -120,29 +165,74 @@ cmd_status() {
   echo "Room: $(field title "$f")"
   echo "You appear as: $(field name "$f")"
   echo "Room page: $SERVER/r/$(field code "$f")"
+  need_curl
+  if is_owner "$f"; then echo "This folder made the room: it can replace the link and delete the room."; fi
 }
 
 cmd_leave() {
   f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room."; exit 0; }
+  need_curl
+  [ "${1:-}" = "--force" ] && CORKTALK_FORCE=1
+  guard_owner "$f"
   t=$(field title "$f"); d=$(field folder "$f")
   leave_quietly "$f"
   echo "Left the Corktalk room \"$t\". The folder $d no longer receives its messages."
 }
 
+cmd_delete_room() {
+  f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room."; exit 1; }
+  need_curl
+  t=$(field title "$f")
+  call DELETE "$SERVER/api/room" -H "Authorization: Bearer $(field key "$f")"
+  [ "$CODE" = 200 ] || { echo "Could not delete the room: $(error_text)"; exit 1; }
+  rm -f "$f"
+  echo "Deleted the Corktalk room \"$t\" and all its messages, for everyone."
+}
+
 cmd_new_link() {
   f=$(find_file "$(here)") || { echo "This folder is not in a Corktalk room."; exit 1; }
-  post "$SERVER/api/new-link?format=sh" -H "Authorization: Bearer $(field key "$f")"
+  need_curl
+  call POST "$SERVER/api/new-link?format=sh" -H "Authorization: Bearer $(field key "$f")" --data ""
   [ "$CODE" = 200 ] || { echo "Could not replace the link: $(error_text)"; exit 1; }
   code=$(printf '%s\n' "$BODY" | sed -n 's/^code=//p')
-  tmp="$f.tmp"; sed "s/^code=.*/code=$code/" "$f" > "$tmp" && mv "$tmp" "$f"
+  tmp="$f.tmp"
+  ( umask 077; sed "s/^code=.*/code=$code/" "$f" > "$tmp" ) && mv "$tmp" "$f"
   echo "The old link no longer works. People already in the room stay in. New link:"
   echo "$SERVER/r/$code"
 }
 
+# Hook input arrives on stdin. Only the session id, the event and its source go to the server.
+hook_body() {
+  input=$(cat)
+  sid=$(json_field session_id "$input")
+  ev=$(json_field hook_event_name "$input")
+  src=$(json_field source "$input")
+  [ -n "$sid" ] || return 1
+  printf '{"hook_event_name":"%s","session_id":"%s","source":"%s"}' "$ev" "$sid" "$src"
+}
+
+# After two "not in the room" answers in a row, forget this folder's membership and say so once.
+gone() {
+  f="$1"; s="$f.gone"
+  if [ -f "$s" ]; then
+    t=$(field title "$f"); rm -f "$f" "$s"
+    echo "[Corktalk] This folder is no longer in the room \"$t\" (the room was deleted, or this folder was removed from it). Tell your user."
+  else
+    : > "$s"
+  fi
+}
+
 cmd_hook() {
   f=$(find_file "$(here)") || { cat >/dev/null; exit 0; }
-  curl -sf -m 5 -X POST -H "Authorization: Bearer $(field key "$f")" -H 'Content-Type: application/json' \
-    --data-binary @- "$SERVER/hook" || true
+  command -v curl >/dev/null 2>&1 || { cat >/dev/null; exit 0; }
+  body=$(hook_body) || exit 0
+  out=$(printf '%s' "$body" | curl -s -m 5 -X POST -H "Authorization: Bearer $(field key "$f")" -H 'Content-Type: application/json' \
+    --data-binary @- -w '\n%{http_code}' "$SERVER/hook" 2>/dev/null) || exit 0
+  code=$(printf '%s\n' "$out" | tail -n 1)
+  case "$code" in
+    200) rm -f "$f.gone"; printf '%s\n' "$out" | sed '$d' ;;
+    401) gone "$f" ;;
+  esac
   exit 0
 }
 
@@ -150,47 +240,59 @@ cmd_hook() {
 # messages; when some arrive it prints them and exits 2, which wakes Claude even
 # if the session is idle. The Stop hook starts it again after every turn.
 cmd_wait() {
-  input=$(cat)
-  f=$(find_file "$(here)") || exit 0
-  sid=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p')
-  [ -n "$sid" ] || exit 0
+  f=$(find_file "$(here)") || { cat >/dev/null; exit 0; }
+  command -v curl >/dev/null 2>&1 || { cat >/dev/null; exit 0; }
+  body=$(hook_body) || exit 0
+  sid=$(json_field session_id "$body")
+  body=$(printf '{"hook_event_name":"CorktalkWait","session_id":"%s"}' "$sid")
   dir="$HOME_DIR/waiting"; mkdir -p "$dir"; lock="$dir/$sid"
-  # One waiter per session.
-  if [ -f "$lock" ] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null; then exit 0; fi
+  # Old lock files (from killed waiters) are dropped after a day.
+  find "$dir" -type f -mmin +1440 -exec rm -f {} + 2>/dev/null
+  # One waiter per session. A lock older than 12 hours is stale, whatever its pid says.
+  if [ -f "$lock" ] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null && [ -z "$(find "$lock" -mmin +725 2>/dev/null)" ]; then exit 0; fi
   echo $$ > "$lock"
+  trap '[ "$(cat "$lock" 2>/dev/null)" = "$$" ] && rm -f "$lock"' EXIT
+  trap 'exit 0' INT TERM
   parent=$PPID
   end=$(( $(date +%s) + 43200 ))
-  body=$(printf '{"hook_event_name":"CorktalkWait","session_id":"%s"}' "$sid")
   while [ "$(date +%s)" -lt "$end" ]; do
-    [ -f "$f" ] || break
-    kill -0 "$parent" 2>/dev/null || break
+    [ -f "$f" ] || exit 0
+    kill -0 "$parent" 2>/dev/null || exit 0
     [ "$(cat "$lock" 2>/dev/null)" = "$$" ] || exit 0
-    out=$(printf '%s' "$body" | curl -sf -m 45 -X POST -H "Authorization: Bearer $(field key "$f")" \
-      -H 'Content-Type: application/json' --data-binary @- "$SERVER/hook" 2>/dev/null)
+    t0=$(date +%s)
+    out=$(printf '%s' "$body" | curl -s -m 45 -X POST -H "Authorization: Bearer $(field key "$f")" \
+      -H 'Content-Type: application/json' --data-binary @- -w '\n%{http_code}' "$SERVER/hook" 2>/dev/null)
     rc=$?
-    if [ -n "$out" ]; then
-      rm -f "$lock"
-      printf '%s\n' "$out" >&2
+    # The session may have closed while we waited.
+    kill -0 "$parent" 2>/dev/null || exit 0
+    code=$(printf '%s\n' "$out" | tail -n 1)
+    msg=$(printf '%s\n' "$out" | sed '$d')
+    if [ "$rc" -eq 0 ] && [ "$code" = 200 ] && [ -n "$msg" ]; then
+      printf '%s\n' "$msg" >&2
       exit 2
     fi
-    [ "$rc" -ne 0 ] && sleep 20
+    [ "$code" = 401 ] && exit 0
+    if [ "$rc" -ne 0 ] || [ "$code" != 200 ]; then sleep 20
+    elif [ $(( $(date +%s) - t0 )) -lt 2 ]; then sleep 5
+    fi
   done
-  rm -f "$lock"
   exit 0
 }
 
 cmd_name() { [ -f "$HOME_DIR/name" ] && cat "$HOME_DIR/name"; exit 0; }
 
-command -v curl >/dev/null 2>&1 || { echo "Corktalk needs curl, which is not installed."; exit 1; }
-
 case "${1:-}" in
   join) shift; cmd_join "$@" ;;
+  join-stdin) read_three; cmd_join "$A" "$B" "$C" ;;
   new) shift; cmd_new "$@" ;;
+  new-stdin) read_three; cmd_new "$A" "$B" "$C" ;;
   status) cmd_status ;;
-  leave) cmd_leave ;;
+  leave) shift; cmd_leave "$@" ;;
+  delete-room) cmd_delete_room ;;
   new-link) cmd_new_link ;;
   name) cmd_name ;;
   hook) cmd_hook ;;
   wait) cmd_wait ;;
-  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  _file) file_for "${2:-}" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

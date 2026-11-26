@@ -15,3 +15,9 @@ new_sqlite_classes = ["Hub"]
 
 [observability]
 enabled = true
+
+# Per-network limit on every API call (the Worker checks it before the hub).
+[[ratelimits]]
+name = "RATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 120, period = 60 }
