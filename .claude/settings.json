@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sf -m 5 -X POST -H \"Authorization: Bearer $CORKTALK_TOKEN\" -H 'Content-Type: application/json' --data-binary @- 'https://corktalk.beecork.com/hook?room=corktalk' || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sf -m 5 -X POST -H \"Authorization: Bearer $CORKTALK_TOKEN\" -H 'Content-Type: application/json' --data-binary @- 'https://corktalk.beecork.com/hook?room=corktalk' || true"
+          }
+        ]
+      }
+    ]
+  }
+}
