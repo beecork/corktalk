@@ -146,6 +146,39 @@ cmd_hook() {
   exit 0
 }
 
+# Runs in the background (async hook with asyncRewake). Waits for new room
+# messages; when some arrive it prints them and exits 2, which wakes Claude even
+# if the session is idle. The Stop hook starts it again after every turn.
+cmd_wait() {
+  input=$(cat)
+  f=$(find_file "$(here)") || exit 0
+  sid=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p')
+  [ -n "$sid" ] || exit 0
+  dir="$HOME_DIR/waiting"; mkdir -p "$dir"; lock="$dir/$sid"
+  # One waiter per session.
+  if [ -f "$lock" ] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null; then exit 0; fi
+  echo $$ > "$lock"
+  parent=$PPID
+  end=$(( $(date +%s) + 43200 ))
+  body=$(printf '{"hook_event_name":"CorktalkWait","session_id":"%s"}' "$sid")
+  while [ "$(date +%s)" -lt "$end" ]; do
+    [ -f "$f" ] || break
+    kill -0 "$parent" 2>/dev/null || break
+    [ "$(cat "$lock" 2>/dev/null)" = "$$" ] || exit 0
+    out=$(printf '%s' "$body" | curl -sf -m 45 -X POST -H "Authorization: Bearer $(field key "$f")" \
+      -H 'Content-Type: application/json' --data-binary @- "$SERVER/hook" 2>/dev/null)
+    rc=$?
+    if [ -n "$out" ]; then
+      rm -f "$lock"
+      printf '%s\n' "$out" >&2
+      exit 2
+    fi
+    [ "$rc" -ne 0 ] && sleep 20
+  done
+  rm -f "$lock"
+  exit 0
+}
+
 cmd_name() { [ -f "$HOME_DIR/name" ] && cat "$HOME_DIR/name"; exit 0; }
 
 command -v curl >/dev/null 2>&1 || { echo "Corktalk needs curl, which is not installed."; exit 1; }
@@ -158,5 +191,6 @@ case "${1:-}" in
   new-link) cmd_new_link ;;
   name) cmd_name ;;
   hook) cmd_hook ;;
+  wait) cmd_wait ;;
   *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
